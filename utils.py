@@ -14,6 +14,8 @@ import socket
 import numpy as np
 import torch
 
+import platform
+
 
 # get save dir
 def get_output_directory(config):
@@ -21,8 +23,14 @@ def get_output_directory(config):
         return os.path.dirname(config.resume)
     else:
         save_dir_root = os.path.join(os.path.dirname(os.path.abspath(__file__)))
-        data_name = config.image_path.split('/')[-1]
+
+        if platform.system() == 'Windows':
+            data_name = config.image_path.split('\\')[-1]
+        else:
+            data_name = config.image_path.split('/')[-1]
+
         save_dir_root = os.path.join(save_dir_root, 'result', data_name)
+
         runs = sorted(glob.glob(os.path.join(save_dir_root, 'run_*')))
         run_id = int(runs[-1].split('_')[-1]) + 1 if runs else 0
 

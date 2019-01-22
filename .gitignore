@@ -27,6 +27,7 @@ share/python-wheels/
 MANIFEST
 .idea/
 /.idea
+result/
 *.iml
 
 # PyInstaller

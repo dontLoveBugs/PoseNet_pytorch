@@ -23,7 +23,17 @@ from utils import *
 class Solver():
     def __init__(self, data_loader, config):
         self.data_loader = data_loader
+
         self.config = config
+
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        self.model_save_path = get_output_directory(config)
+        self.summary_save_path = get_summary_log_directory(self.model_save_path)
+
+        self.start_epoch = 0
+        self.best_train_loss = 10000
+        self.best_val_loss = 10000
 
         if self.config.resume:
             config, model_dict, optimizer, epoch, best_result = self.load_trained_model()
@@ -32,6 +42,7 @@ class Solver():
             self.model = model_parser(self.config.model, self.config.fixed_weight, self.config.dropout_rate,
                                       self.config.bayesian)
             self.model.load_state_dict(model_dict)
+            self.print_network(self.model, self.config.model)
 
             self.optimizer.load_state_dict(optimizer)
             self.start_epoch = epoch
@@ -44,20 +55,11 @@ class Solver():
             if not self.config.bayesian:
                 self.config.dropout_rate = 0.0
 
-            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
             self.model = model_parser(self.config.model, self.config.fixed_weight, self.config.dropout_rate,
                                       self.config.bayesian)
 
             self.criterion = PoseLoss(self.config.sx, self.config.sq, self.config.learn_beta)
             self.print_network(self.model, self.config.model)
-
-            self.start_epoch = 0
-            self.best_train_loss = 10000
-            self.best_val_loss = 10000
-
-            self.model_save_path = get_output_directory(config)
-            self.summary_save_path = get_summary_log_directory(self.model_save_path)
 
             if self.config.learn_beta:
                 self.optimizer = optim.Adam([{'params': self.model.parameters()},
@@ -90,14 +92,15 @@ class Solver():
         return config, model_dict, epoch, optimizer, best_result
 
     def print_network(self, model, name):
-        num_params = 0
-        for param in model.parameters():
-            num_params += param.numel()
-
-        print('*' * 20)
-        print(name)
-        print(model)
-        print('*' * 20)
+        # num_params = 0
+        # for param in model.parameters():
+        #     num_params += param.numel()
+        #
+        # print('*' * 20)
+        # print(name)
+        # print(model)
+        # print('*' * 20)
+        print('Using Model is ', name)
 
     def loss_func(self, input, target):
         diff = torch.norm(input - target, dim=1)
@@ -157,7 +160,7 @@ class Solver():
                     self.optimizer.zero_grad()
 
                     # forward
-                    pos_out, ori_out, _ = self.model(inputs)
+                    pos_out, ori_out = self.model(inputs)
 
                     pos_true = poses[:, :3]
                     ori_true = poses[:, 3:]
@@ -189,15 +192,14 @@ class Solver():
                         self.optimizer.step()
                         n_iter += 1
 
-                    print('{}th {} Loss: total loss {:.3f} / pos loss {:.3f} / ori loss {:.3f}'.format(i, phase,
-                                                                                                       loss_print,
-                                                                                                       loss_pos_print,
-                                                                                                       loss_ori_print))
-            # save trained model for each epoch
+                    print('{} epoch {} [{}/{}] \n\t'
+                          'total loss: {:.3f}, pos loss {:.3f}, ori loss {:.3f}'.
+                          format(phase, epoch, i, len(data_loader), loss_print, loss_pos_print, loss_ori_print))
 
             error_train_loss = np.median(error_train)
             error_val_loss = np.median(error_val)
 
+            # save trained model for each epoch
             if (epoch + 1) % self.config.model_save_step == 0:
                 is_best = error_val_loss < best_val_loss
                 save_checkpoint({
@@ -232,15 +234,15 @@ class Solver():
         print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
 
     def test(self):
-        f = open(self.summary_save_path + '/test_result.csv', 'w')
+        f = open(self.model_save_path + '/test_result.csv', 'w')
 
         self.model = self.model.to(self.device)
         self.model.eval()
 
         if self.config.test_model is None:
-            test_model_path = self.model_save_path + '/best_net.pth'
+            test_model_path = self.model_save_path + '/model_best.pth.tar'
         else:
-            test_model_path = self.model_save_path + '/{}_net.pth'.format(self.config.test_model)
+            test_model_path = self.config.test_model
 
         print('Load trained model: ', test_model_path)
         self.model.load_state_dict(torch.load(test_model_path))
@@ -269,7 +271,9 @@ class Solver():
                 ori_array = torch.Tensor(num_bayesian_test, 4)
 
                 for i in range(num_bayesian_test):
-                    pos_single, ori_single, _ = self.model(inputs)
+                    with torch.no_grad():
+                        pos_single, ori_single = self.model.forward(inputs)
+
                     pos_array[i, :] = pos_single
                     ori_array[i, :] = F.normalize(ori_single, p=2, dim=1)
 
@@ -282,19 +286,21 @@ class Solver():
                 pos_out = pred_pose[:3]
                 ori_out = pred_pose[3:]
             else:
-                pos_out, ori_out, _ = self.model(inputs)
+                with torch.no_grad():
+                    pos_out, ori_out = self.model.forward(inputs)
+
                 pos_out = pos_out.squeeze(0).detach().cpu().numpy()
                 ori_out = F.normalize(ori_out, p=2, dim=1)
                 ori_out = quat_to_euler(ori_out.squeeze(0).detach().cpu().numpy())
-                print('pos out', pos_out)
-                print('ori_out', ori_out)
+                # print('pos out', pos_out)
+                # print('ori_out', ori_out)
 
             pos_true = poses[:, :3].squeeze(0).numpy()
             ori_true = poses[:, 3:].squeeze(0).numpy()
 
             ori_true = quat_to_euler(ori_true)
-            print('pos true', pos_true)
-            print('ori true', ori_true)
+            # print('pos true', pos_true)
+            # print('ori true', ori_true)
             loss_pos_print = array_dist(pos_out, pos_true)
             loss_ori_print = array_dist(ori_out, ori_true)
 
