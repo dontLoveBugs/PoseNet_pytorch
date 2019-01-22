@@ -25,48 +25,69 @@ class Solver():
         self.data_loader = data_loader
         self.config = config
 
-        # do not use dropout if not bayesian mode
-        if not self.config.bayesian:
-            self.config.dropout_rate = 0.0
+        if self.config.resume:
+            config, model_dict, optimizer, epoch, best_result = self.load_trained_model()
+            self.config = config
 
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-        self.model = model_parser(self.config.model, self.config.fixed_weight, self.config.dropout_rate,
-                                  self.config.bayesian)
-
-        self.criterion = PoseLoss(self.device, self.config.sx, self.config.sq, self.config.learn_beta)
-        self.print_network(self.model, self.config.model)
-
-        self.start_epoch = 0
-
-        self.model_save_path = get_output_directory(config)
-        self.summary_save_path = get_summary_log_directory(self.model_save_path)
-
-        if self.config.learn_beta:
-            self.optimizer = optim.Adam([{'params': self.model.parameters()},
-                                         {'params': [self.criterion.sx, self.criterion.sq]}],
-                                        lr=self.config.lr, weight_decay=self.config.weight_decay)
-        else:
-            self.optimizer = optim.Adam(self.model.parameters(),
-                                        lr=self.config.lr, weight_decay=self.config.weight_decay)
-
-        if self.config.pretrained_model:
-            model_dict, optimizer, epoch, best_result = self.load_trained_model()
+            self.model = model_parser(self.config.model, self.config.fixed_weight, self.config.dropout_rate,
+                                      self.config.bayesian)
             self.model.load_state_dict(model_dict)
+
             self.optimizer.load_state_dict(optimizer)
             self.start_epoch = epoch
-            self.best_result = best_result
+            self.best_val_loss = best_result
+
+            self.criterion = PoseLoss(self.device, self.config.sx, self.config.sq, self.config.learn_beta)
+
+        else:
+            # do not use dropout if not bayesian mode
+            if not self.config.bayesian:
+                self.config.dropout_rate = 0.0
+
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+            self.model = model_parser(self.config.model, self.config.fixed_weight, self.config.dropout_rate,
+                                      self.config.bayesian)
+
+            self.criterion = PoseLoss(self.config.sx, self.config.sq, self.config.learn_beta)
+            self.print_network(self.model, self.config.model)
+
+            self.start_epoch = 0
+            self.best_train_loss = 10000
+            self.best_val_loss = 10000
+
+            self.model_save_path = get_output_directory(config)
+            self.summary_save_path = get_summary_log_directory(self.model_save_path)
+
+            if self.config.learn_beta:
+                self.optimizer = optim.Adam([{'params': self.model.parameters()},
+                                             {'params': [self.criterion.sx, self.criterion.sq]}],
+                                            lr=self.config.lr, weight_decay=self.config.weight_decay)
+            else:
+                self.optimizer = optim.Adam(self.model.parameters(),
+                                            lr=self.config.lr, weight_decay=self.config.weight_decay)
+
+            # write training parameters to config file
+            config_txt = os.path.join(self.model_save_path, 'config.txt')
+            if not os.path.exists(config_txt):
+                with open(config_txt, 'w') as txtfile:
+                    args_ = vars(self.config)
+                    args_str = ''
+                    for k, v in args_.items():
+                        args_str = args_str + str(k) + ':' + str(v) + ',\t\n'
+                    txtfile.write(args_str)
 
     def load_trained_model(self):
 
         checkpoint = torch.load(self.config.resume)
+        config = checkpoint['config']
         model_dict = checkpoint['state_dict']
         epoch = checkpoint['epoch']
         optimizer = checkpoint['optimizer']
         best_result = checkpoint['best_result']
 
         print('Load pretrained network: ', self.config.resume)
-        return model_dict, epoch, optimizer, best_result
+        return config, model_dict, epoch, optimizer, best_result
 
     def print_network(self, model, name):
         num_params = 0
@@ -105,8 +126,8 @@ class Solver():
         n_iter = start_epoch * len(self.data_loader['train'])
 
         # Pre-define variables to get the best model
-        best_train_loss = 10000
-        best_val_loss = 10000
+        best_train_loss = self.best_train_loss
+        best_val_loss = self.best_val_loss
         best_train_model = None
         best_val_model = None
 
@@ -172,16 +193,20 @@ class Solver():
                                                                                                        loss_print,
                                                                                                        loss_pos_print,
                                                                                                        loss_ori_print))
+            # save trained model for each epoch
 
             error_train_loss = np.median(error_train)
             error_val_loss = np.median(error_val)
 
             if (epoch + 1) % self.config.model_save_step == 0:
-                save_filename = self.model_save_path + '/%s_net.pth' % epoch
-                # save_path = os.path.join('models', save_filename)
-                torch.save(self.model.cpu().state_dict(), save_filename)
-                if torch.cuda.is_available():
-                    self.model.to(self.device)
+                is_best = error_val_loss < best_val_loss
+                save_checkpoint({
+                    'config': self.config,
+                    'epoch': epoch,
+                    'model': self.model.state_dict(),
+                    'best_result': best_val_loss,
+                    'optimizer': self.optimizer.state_dict(),
+                }, is_best, epoch, self.model_save_path)
 
             if error_train_loss < best_train_loss:
                 best_train_loss = error_train_loss
@@ -189,26 +214,25 @@ class Solver():
             if error_val_loss < best_val_loss:
                 best_val_loss = error_val_loss
                 best_val_model = epoch
-                save_filename = self.model_save_path + '/best_net.pth'
-                torch.save(self.model.cpu().state_dict(), save_filename)
-                if torch.cuda.is_available():
-                    self.model.to(self.device)
+
+                save_checkpoint({
+                    'config': self.config,
+                    'epoch': epoch,
+                    'model': self.model.state_dict(),
+                    'best_result': best_val_loss,
+                    'optimizer': self.optimizer.state_dict(),
+                }, True, epoch, self.model_save_path)
 
             print('Train and Validaion error {} / {}'.format(error_train_loss, error_val_loss))
-            print('=' * 40)
-            print('=' * 40)
 
             if use_tensorboard:
-                writer.add_scalars('loss/trainval', {'train': error_train_loss,
-                                                     'val': error_val_loss}, epoch)
+                writer.add_scalars('loss/trainval', {'train': error_train_loss, 'val': error_val_loss}, epoch)
 
         time_elapsed = time.time() - since
         print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
 
     def test(self):
         f = open(self.summary_save_path + '/test_result.csv', 'w')
-
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.model = self.model.to(self.device)
         self.model.eval()

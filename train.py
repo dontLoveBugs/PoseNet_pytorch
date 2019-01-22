@@ -44,7 +44,7 @@ if __name__ == '__main__':
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='range 0.0 to 1.0')
     parser.add_argument('--shuffle', type=bool, default=True)
     parser.add_argument('--fixed_weight', type=bool, default=False)
-    parser.add_argument('--model', type=str, default='Resnet', choices=['Googlenet', 'Resnet'])
+    parser.add_argument('--model', type=str, default='Googlenet', choices=['Googlenet', 'Resnet'])
     parser.add_argument('--resume', type=str, default=None, help='checkpoint path')
 
     # dataset setting
